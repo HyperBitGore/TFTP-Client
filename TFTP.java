@@ -1,4 +1,5 @@
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -23,11 +24,13 @@ public class TFTP {
         public byte[] data;
         public int length;
         public PacketType type;
+        public int port;
 
-        public ReceivedPacket(byte[] data, int length, PacketType type) {
+        public ReceivedPacket(byte[] data, int length, PacketType type, int port) {
             this.data = data;
             this.length = length;
             this.type = type;
+            this.port = port;
         }
     }
 
@@ -46,8 +49,8 @@ public class TFTP {
         this.tid = (int) (Math.random() * 65535);
     }
 
-    private void sendPacket(PacketType type, String filename, byte[] outputData) {
-        byte[] data = new byte[512];
+    private void sendPacket(PacketType type, String filename, byte[] outputData, int length) {
+        byte[] data = new byte[516];
         int data_length = 0;
         // Construct and send a TFTP packet based on the type and filename
         switch (type) {
@@ -85,6 +88,11 @@ public class TFTP {
                 // Construct a Data packet
                 data[0] = 0;
                 data[1] = (byte) PacketType.DATA.code;
+                // need block number and data
+                for (int i = 0; i < length; i++) {
+                    data[2 + i] = outputData[i];
+                }   
+                data_length = 2 + length;
                 break;
             case ERROR:
                 // Construct an Error packet
@@ -94,10 +102,9 @@ public class TFTP {
             case ACK:
                 data[0] = 0;
                 data[1] = (byte) PacketType.ACK.code;
-                // need block number
-                for (int i = 0; i < 2; i++) {
-                    data[2 + i] = outputData[i];
-                }
+                // block number
+                data[2] = outputData[0];
+                data[3] = outputData[1];
                 data_length = 4;
                 break;
             default:
@@ -118,13 +125,14 @@ public class TFTP {
     }
     private ReceivedPacket receivePacket() {
         // Code to receive and handle packets goes here
-        DatagramPacket packet = new DatagramPacket(new byte[512], 512);
+        DatagramPacket packet = new DatagramPacket(new byte[516], 516);
         try {
             socket.receive(packet);
         } catch (Exception e) {
             e.printStackTrace();
         }
         byte[] data = packet.getData();
+        int port =packet.getPort();
         // opcode is in first two bytes
         int opcode = ((data[0] & 0xFF) << 8) | (data[1] & 0xFF);
         PacketType type = null;
@@ -134,7 +142,16 @@ public class TFTP {
                 break;
             }
         }
-        ReceivedPacket receivedPacket = new ReceivedPacket(data, packet.getLength(), type);
+        if (type == null) {
+            System.out.println("Received packet with unknown opcode: " + opcode);
+            return null;
+        }
+        if (type == PacketType.ERROR) {
+            int errorCode = ((data[2] & 0xFF) << 8) | (data[3] & 0xFF);
+            String errorMessage = new String(data, 4, packet.getLength() - 4);
+            System.out.println("Received ERROR packet with code: " + errorCode + " and message: " + errorMessage);
+        }
+        ReceivedPacket receivedPacket = new ReceivedPacket(data, packet.getLength(), type, port);
         return receivedPacket;
     }
 
@@ -146,17 +163,55 @@ public class TFTP {
         } catch (SocketException e) {
             e.printStackTrace();
         }
-        sendPacket(PacketType.WRQ, filename, null);
+        sendPacket(PacketType.WRQ, filename, null, 0);
         ReceivedPacket receivedPacket = receivePacket();
         if (receivedPacket.type == PacketType.ACK) {
-            System.out.println("Received ACK for WRQ");
+            System.out.println("Received ACK for WRQ from port " + receivedPacket.port);
         } else {
             System.out.println("Unexpected packet type: " + receivedPacket.type);
             return;
         }
         boolean terminate = false;
+        int block_number = 1;
+        FileInputStream fis = null;
+        try {
+            fis = new FileInputStream(new File(filename));
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+        }
+        byte[] buffer = new byte[512];
+        byte[] output_buffer = new byte[514];
+        this.serverPort = receivedPacket.port; // Update server port to the one used by the server for this transfer
         while (!terminate) {
-            
+            int read = 0;
+            try {
+                read = fis.read(buffer);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            if (read == -1) {
+                terminate = true;
+                read = 0;
+            } else if (read < 512) {
+                terminate = true;
+            }
+            System.arraycopy(buffer, 0, output_buffer, 2, read);
+            output_buffer[0] = (byte) (block_number >> 8);
+            output_buffer[1] = (byte) (block_number & 0xFF);
+            sendPacket(PacketType.DATA, null, output_buffer, read + 2);
+            block_number++;
+            ReceivedPacket ackPacket = receivePacket();
+            if (ackPacket.type == PacketType.ACK) {
+                System.out.println("Received ACK for block " + (block_number - 1) + " from port " + ackPacket.port);
+            } else {
+                System.out.println("Unexpected packet type: " + ackPacket.type);
+                return;
+            }
+        }
+        try {
+            fis.close();
+        } catch (IOException e) {
+            e.printStackTrace();
         }
         socket.close();
     }
@@ -168,7 +223,7 @@ public class TFTP {
         } catch (SocketException e) {
             e.printStackTrace();
         }
-        sendPacket(PacketType.RRQ, filename, null);
+        sendPacket(PacketType.RRQ, filename, null, 0);
         boolean terminate = false;
         FileOutputStream fos = null;
         try {
@@ -176,16 +231,16 @@ public class TFTP {
         } catch (FileNotFoundException e) {
             e.printStackTrace();
         }
-        
         while (!terminate) {
             ReceivedPacket receivedPacket = receivePacket();
             if (receivedPacket.type == PacketType.DATA) {
-                System.out.println("Received DATA packet with length: " + receivedPacket.length);
+                serverPort = receivedPacket.port; // Update server port to the one used by the server for this transfer
+                System.out.println("Received DATA packet with length: " + receivedPacket.length + " from port " + receivedPacket.port);
                 // Send ACK for the received DATA packet
                 byte[] blockNumber = new byte[2];
                 blockNumber[0] = receivedPacket.data[2];
                 blockNumber[1] = receivedPacket.data[3];
-                sendPacket(PacketType.ACK, null, blockNumber);
+                sendPacket(PacketType.ACK, null, blockNumber, 2);
                 // Check if this is the last DATA packet (length < 512)
                 try {
                     fos.write(receivedPacket.data, 4, receivedPacket.length - 4);
