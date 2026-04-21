@@ -35,18 +35,12 @@ public class TFTP {
     }
 
     private String serverAddress;
-    private int serverPort;
-    private int tid;
+    private int serverPort; // the TID in the RFC
     private DatagramSocket socket = null;
 
     public TFTP(String serverAddress, int serverPort) {
         this.serverAddress = serverAddress;
         this.serverPort = serverPort;
-        this.tid = 0;
-    }
-
-    private void pickTID() {
-        this.tid = (int) (Math.random() * 65535);
     }
 
     private void sendPacket(PacketType type, String filename, byte[] outputData, int length) {
@@ -98,6 +92,12 @@ public class TFTP {
                 // Construct an Error packet
                 data[0] = 0;
                 data[1] = (byte) PacketType.ERROR.code;
+                // assuming we passed the error message as outputData
+                for (int i = 0; i < outputData.length; i++) {
+                    data[2 + i] = outputData[i];
+                }
+                data[2 + outputData.length] = 0;
+                data_length = 2 + outputData.length + 1;
                 break;
             case ACK:
                 data[0] = 0;
@@ -124,7 +124,6 @@ public class TFTP {
         }
     }
     private ReceivedPacket receivePacket() {
-        // Code to receive and handle packets goes here
         DatagramPacket packet = new DatagramPacket(new byte[516], 516);
         try {
             socket.receive(packet);
@@ -156,7 +155,6 @@ public class TFTP {
     }
 
     public void writeFile(String filename) {
-        pickTID();
         socket = null;
         try {
             socket = new DatagramSocket();
@@ -181,6 +179,7 @@ public class TFTP {
         }
         byte[] buffer = new byte[512];
         byte[] output_buffer = new byte[514];
+        // need the correct server TID
         this.serverPort = receivedPacket.port; // Update server port to the one used by the server for this transfer
         while (!terminate) {
             int read = 0;
@@ -216,7 +215,6 @@ public class TFTP {
         socket.close();
     }
     public void readFile(String filename, String output_filename) {
-        pickTID();
         socket = null;
         try {
             socket = new DatagramSocket();
@@ -234,7 +232,7 @@ public class TFTP {
         while (!terminate) {
             ReceivedPacket receivedPacket = receivePacket();
             if (receivedPacket.type == PacketType.DATA) {
-                serverPort = receivedPacket.port; // Update server port to the one used by the server for this transfer
+                serverPort = receivedPacket.port; // Update server port to the one used by the server for this transfer, TID
                 System.out.println("Received DATA packet with length: " + receivedPacket.length + " from port " + receivedPacket.port);
                 // Send ACK for the received DATA packet
                 byte[] blockNumber = new byte[2];

@@ -1,9 +1,12 @@
+// add octal support
+// test against LAN server
 public class main {
     public static void main(String[] args) {
         System.out.println("Starting the TFTP client...");
-        TFTP tftp = new TFTP("localhost", 69);
+        System.out.println("Please input the server address: ");
+        String serverAddress = System.console().readLine();
+        TFTP tftp = new TFTP(serverAddress, 69);
         boolean exit = false;
-        // tftp.readFile("large.txt", "large_received.txt");
         while (!exit) {
             System.out.println("Enter 'r' to read a file, 'w' to write a file, or 'q' to quit:");
             String command = System.console().readLine();
@@ -23,7 +26,5 @@ public class main {
                 System.out.println("Invalid command. Please enter 'r', 'w', or 'q'.");
             }
         }
-        // tftp.writeFile("test_send.txt");
-        // tftp.readFile("example.txt", "example_received.txt");
     }
 }
