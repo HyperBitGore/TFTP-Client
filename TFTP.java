@@ -57,11 +57,12 @@ public class TFTP {
                 }
                 data[2 + filename.length()] = 0; // Null-terminate the filename
                 // mode
-                for (int i = 0; i < "netascii".length(); i++) {
-                    data[3 + filename.length() + i] = (byte) "netascii".charAt(i);
+                // in output data
+                for (int i = 0; i < outputData.length; i++) {
+                    data[3 + filename.length() + i] = outputData[i];
                 }
-                data[3 + filename.length() + "netascii".length()] = 0; // Null-terminate the mode
-                data_length = 3 + filename.length() + "netascii".length() + 1;
+                data[3 + filename.length() + outputData.length] = 0; // Null-terminate the mode
+                data_length = 3 + filename.length() + outputData.length + 1;
                 break;
             case WRQ:
                 // Construct a Write Request packet
@@ -72,11 +73,12 @@ public class TFTP {
                 }
                 data[2 + filename.length()] = 0; // Null-terminate the filename
                 // mode
-                for (int i = 0; i < "netascii".length(); i++) {
-                    data[3 + filename.length() + i] = (byte) "netascii".charAt(i);
+                // in output data
+                for (int i = 0; i < outputData.length; i++) {
+                    data[3 + filename.length() + i] = outputData[i];
                 }
-                data[3 + filename.length() + "netascii".length()] = 0; // Null-terminate the mode
-                data_length = 3 + filename.length() + "netascii".length() + 1;
+                data[3 + filename.length() + outputData.length] = 0; // Null-terminate the mode
+                data_length = 3 + filename.length() + outputData.length + 1;
                 break;
             case DATA:
                 // Construct a Data packet
@@ -131,7 +133,7 @@ public class TFTP {
             e.printStackTrace();
         }
         byte[] data = packet.getData();
-        int port =packet.getPort();
+        int port = packet.getPort();
         // opcode is in first two bytes
         int opcode = ((data[0] & 0xFF) << 8) | (data[1] & 0xFF);
         PacketType type = null;
@@ -154,14 +156,14 @@ public class TFTP {
         return receivedPacket;
     }
 
-    public void writeFile(String filename) {
+    public void writeFile(String filename, String mode) {
         socket = null;
         try {
             socket = new DatagramSocket();
         } catch (SocketException e) {
             e.printStackTrace();
         }
-        sendPacket(PacketType.WRQ, filename, null, 0);
+        sendPacket(PacketType.WRQ, filename, mode.getBytes(), mode.getBytes().length);
         ReceivedPacket receivedPacket = receivePacket();
         if (receivedPacket.type == PacketType.ACK) {
             System.out.println("Received ACK for WRQ from port " + receivedPacket.port);
@@ -179,6 +181,8 @@ public class TFTP {
         }
         byte[] buffer = new byte[512];
         byte[] output_buffer = new byte[514];
+        byte[] netascii_buffer = new byte[2048]; // buffer of leftover bytes when we convert to netascii carriage returns
+        int netascii_index = 0;
         // need the correct server TID
         this.serverPort = receivedPacket.port; // Update server port to the one used by the server for this transfer
         while (!terminate) {
@@ -197,11 +201,62 @@ public class TFTP {
             System.arraycopy(buffer, 0, output_buffer, 2, read);
             output_buffer[0] = (byte) (block_number >> 8);
             output_buffer[1] = (byte) (block_number & 0xFF);
-            sendPacket(PacketType.DATA, null, output_buffer, read + 2);
+            if (mode.equalsIgnoreCase("netascii")) {
+                // need to convert output_buffer from normal to netascii
+                // write data into netascii queue, converting line endings as needed
+                for (int j = 0; j < read && j < buffer.length && netascii_index < netascii_buffer.length; j++) {
+                    if (buffer[j] == '\r' && j + 1 < read && buffer[j + 1] == '\n') {
+                        netascii_buffer[netascii_index++] = '\r';
+                        netascii_buffer[netascii_index++] = '\n';
+                        j++; // skip the next character as we have already processed it
+                    } else if (buffer[j] == '\n' && (netascii_index == 0 || netascii_buffer[netascii_index - 1] != '\r')) {
+                        netascii_buffer[netascii_index++] = '\r';
+                        netascii_buffer[netascii_index++] = '\n';
+                    } else {
+                        if (buffer[j] == '\r') {
+                            byte[] nextByte = new byte[1];
+                            try {
+                                fis.read(nextByte);
+                            } catch (IOException e) {
+                                e.printStackTrace();
+                            }
+                            if (nextByte[0] != '\n') {
+                                netascii_buffer[netascii_index++] = buffer[j];
+                                netascii_buffer[netascii_index++] = nextByte[0];
+                            } else {
+                                netascii_buffer[netascii_index++] = '\r';
+                                netascii_buffer[netascii_index++] = '\n';
+                            }
+
+                        } else {
+                            netascii_buffer[netascii_index++] = buffer[j];
+                        }
+                    }
+
+                }
+                // take 512 bytes from netascii_buffer and send as DATA packet
+                int bytes_to_send = Math.min(512, netascii_index);
+                System.arraycopy(netascii_buffer, 0, output_buffer, 2, bytes_to_send);
+                sendPacket(PacketType.DATA, null, output_buffer, bytes_to_send + 2);
+                // shift any remaining bytes in netascii_buffer to the beginning
+                if (netascii_index > 512) {
+                    int remaining = netascii_index - 512;
+                    System.arraycopy(netascii_buffer, 512, netascii_buffer, 0, remaining);
+                    netascii_index = remaining;
+                } else {
+                    netascii_index = 0;
+                }
+
+            } else {
+                sendPacket(PacketType.DATA, null, output_buffer, read + 2);
+            }
             block_number++;
             ReceivedPacket ackPacket = receivePacket();
             if (ackPacket.type == PacketType.ACK) {
                 System.out.println("Received ACK for block " + (block_number - 1) + " from port " + ackPacket.port);
+            } else if (ackPacket.type == PacketType.ERROR) {
+                System.out.println("Received ERROR packet while waiting for ACK with message: " + new String(ackPacket.data, 4, ackPacket.length - 4));
+                return;
             } else {
                 System.out.println("Unexpected packet type: " + ackPacket.type);
                 return;
@@ -214,14 +269,14 @@ public class TFTP {
         }
         socket.close();
     }
-    public void readFile(String filename, String output_filename) {
+    public void readFile(String filename, String output_filename, String mode) {
         socket = null;
         try {
             socket = new DatagramSocket();
         } catch (SocketException e) {
             e.printStackTrace();
         }
-        sendPacket(PacketType.RRQ, filename, null, 0);
+        sendPacket(PacketType.RRQ, filename, mode.getBytes(), mode.getBytes().length);
         boolean terminate = false;
         FileOutputStream fos = null;
         try {
@@ -239,15 +294,37 @@ public class TFTP {
                 blockNumber[0] = receivedPacket.data[2];
                 blockNumber[1] = receivedPacket.data[3];
                 sendPacket(PacketType.ACK, null, blockNumber, 2);
-                // Check if this is the last DATA packet (length < 512)
                 try {
-                    fos.write(receivedPacket.data, 4, receivedPacket.length - 4);
+                    if (mode.equalsIgnoreCase("netascii")) {
+                        for (int i = 4; i < receivedPacket.length; i++) {
+                            if (receivedPacket.data[i] == '\r') {
+                                if (i + 1 < receivedPacket.length && receivedPacket.data[i + 1] == '\0') {
+                                    fos.write('\r');
+                                    i++;
+                                } else if (i + 1 < receivedPacket.length && receivedPacket.data[i + 1] == '\n') {
+                                    fos.write('\r');
+                                    fos.write('\n');
+                                    i++;
+                                } else {
+                                    fos.write('\r');
+                                }
+                            } else {
+                                fos.write(receivedPacket.data[i]);
+                            }
+                        }
+                    } else {
+                        fos.write(receivedPacket.data, 4, receivedPacket.length - 4);
+                    }
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
+                // Check if this is the last DATA packet (length < 512)
                 if (receivedPacket.length < 516) {
                     terminate = true;
                 }
+            } else if (receivedPacket.type == PacketType.ERROR) {
+                System.out.println("Received ERROR packet while waiting for DATA with message: " + new String(receivedPacket.data, 4, receivedPacket.length - 4));
+                return;
             } else {
                 System.out.println("Unexpected packet type: " + receivedPacket.type);
                 return;
